@@ -3,147 +3,292 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <sys/types.h>
-#include <wait.h>
 #include <stdbool.h>
+#include <wait.h>
+#include <fcntl.h>
+
 #define MAX 1024
 
-int cmd_count = 0, alias_count = 0, script_count = 0, quotes_count = 0;
-char pr[50];
-bool quotes;
+int cmd=0;
 
-typedef struct {
-    char* key;
+bool and_or(char** command, int* jobIndex);
+void toFile(char* command, char** filename, int i, int* saved);
+int redirectToFile(char* filename);
+bool jobs(char** command);
+void analyse(char** args, bool* success, int* jobIndex);
+bool analyse2nd(char** args, int* jobIndex);
+void process(char input[MAX], char** args, bool* quotes);
+bool execute(char** args, int argc, int* jobIndex);
+void exitShell(int quotes_count);
+
+typedef struct J{
+    int index;
+    int pid;
     char* command;
-}Alias;
+    struct J* next;
+}Job;
+Job* head = NULL;
 
-Alias* aliases = NULL;
-void splitKeyCmd(char* str, char* key, char* command, char c);
-void addAlias(char* key, char* command);
-void deleteAliasByKey(char* key);
-void exitShell();
-
-void prompt() {
-    sprintf(pr, "#cmd:%d|#alias:%d|#script lines:%d> ", cmd_count, alias_count, script_count); //prompt
+void addJob(char** args, int argc, int pid, int index){
+    Job* j = (Job*) malloc(sizeof(Job));
+    if(head==NULL){
+        j->next=NULL;
+        j->pid=pid;
+        j->index=index;
+        j->command=(char*) malloc(MAX* sizeof(char));
+        char ss[MAX]="";
+        for (int i = 0; i < argc; ++i) {
+            strcat(ss, args[i]);
+            strcat(ss, " ");
+        }
+        strcpy(j->command, ss);
+        head= j;
+    }
+    else{
+        Job* current=head;
+        while (current->next!=NULL)
+            current=current->next;
+        j->pid=pid;
+        j->index=index;
+        j->next=NULL;
+        j->command=(char*) malloc(MAX* sizeof(char));
+        char ss[MAX]="";
+        for (int i = 0; i < argc; ++i) {
+            strcat(ss, args[i]);
+            strcat(ss, " ");
+        }
+        strcpy(j->command, ss);
+        current->next=j;
+    }
 }
 
-void addAlias(char* key, char* command) {
-    char com[MAX]="", k[MAX]=""; //remove whitespace from key and command
-    char* tt= strtok(command, " ");
-    while(tt!=NULL){
-        strcat(com, tt);
-        tt= strtok(NULL, " ");
-        if(tt!=NULL)
-            strcat(com, " ");
-    }
-    char* tk= strtok(key, " ");
-    while(tk!=NULL){
-        strcat(k, tk);
-        tk= strtok(NULL, " ");
-    }
-    if(strcmp(k,"")==0 || strcmp(com,"")==0){
-        printf("ERR\n");
+void deleteJob(int pid){
+    if(head->pid==pid){
+        Job* temp=head;
+        head= head->next;
+        free(temp->command);
+        free(temp);
         return;
     }
-    if (aliases == NULL) {
-        aliases = (Alias*)malloc(sizeof(Alias));
-        if (aliases == NULL) {
-            perror("malloc");
-            exitShell();
+    Job* cur=head;
+    while(cur->next!=NULL){
+        if(cur->next->pid==pid){
+            Job* temp=cur->next;
+            cur->next=temp->next;
+            free(temp->command);
+            free(temp);
+            return;
         }
+        cur=cur->next;
     }
-    for (int i = 0; i < alias_count; ++i) { //if alias already exists, delete it to replace with new command
-        if (strcmp(aliases[i].key, key) == 0) {
-            deleteAliasByKey(key);
-            break;
-        }
-    }
-
-    Alias* temp = (Alias*)realloc(aliases, (alias_count + 1) * sizeof(Alias));
-    if (temp == NULL) {
-        perror("realloc");
-        exitShell();
-    }
-    aliases = temp;
-
-    aliases[alias_count].key = (char *) malloc((strlen(key) + 1) * sizeof(char));
-    aliases[alias_count].command = (char *) malloc((strlen(com) + 1) * sizeof(char));
-
-    if (aliases[alias_count].key == NULL || aliases[alias_count].command == NULL) {
-        perror("malloc2");
-        exitShell();
-    }
-
-    strcpy(aliases[alias_count].key, key);
-    strcpy(aliases[alias_count].command, com);
-    alias_count++;
-    cmd_count++;
-    if (quotes)
-        quotes_count++;
 }
 
-void splitKeyCmd(char* str, char* key, char* command, char c) {
-    char* index = strchr(str, c);
-    if (index != NULL) {
-        size_t len = index - str;
-        strncpy(key, str, len);
-        key[len] = '\0';
-        strcpy(command, index + 1);
+void prompt() {
+    printf("#cmd:%d|#alias:0|#script lines:0> ", cmd); //prompt
+}
+
+bool and_or(char** command, int* jobIndex){
+    bool success=false;
+    char **command1;
+    char **command2;
+    char **command3=NULL;
+    char *second;
+    int i=0, b=0, c=0;
+    command1=command;
+    while(command[i]!=NULL && strcmp(command[i],"&&")!=0 && strcmp(command[i],"||")!=0){
+        i++;
+    }
+    char* first= command[i];
+    command1[i++]= NULL;
+
+    command2= command+i;
+    while(command[i]!=NULL && strcmp(command[i],"&&")!=0 && strcmp(command[i],"||")!=0){
+        i++;
+        b++;
+    }
+
+    if(command[i]!=NULL) {
+        second = command[i++];
+        command2[b]=NULL;
+        command3=command+i;
+        while(command[i]!=NULL){
+            i++;
+            c++;
+        }
+        command3[c]=NULL;
+    }
+    else{
+        command2[b]=NULL;
+    }
+
+    if(strcmp(first,"&&")==0){
+        success= analyse2nd(command1, jobIndex);
+        if(success){
+            success= analyse2nd(command2, jobIndex);
+        }
+        if(command3!=NULL){
+            if(strcmp(second,"&&")==0 && success)
+                success= analyse2nd(command3, jobIndex);
+            else if(strcmp(second,"||")==0 && !success)
+                success= analyse2nd(command3, jobIndex);
+        }
+    }
+
+    else if(strcmp(first,"||")==0){
+        success= analyse2nd(command1, jobIndex);
+        if(!success){
+            success= analyse2nd(command2, jobIndex);
+            if(command3!=NULL){
+                if(strcmp(second,"&&")==0 && success)
+                    success= analyse2nd(command3, jobIndex);
+                else if(strcmp(second,"||")==0 && !success)
+                    success= analyse2nd(command3, jobIndex);
+            }
+        }
+    }
+    return success;
+}
+
+bool readFile(char* filename){
+    FILE* fp= fopen(filename, "r");
+    if(fp==NULL){
+        perror("f_open");
+        return false;
+    }
+    char line[MAX];
+    while(fgets(line, MAX, fp)!=NULL){
+        fprintf(stdout, "%s", line);
+    }
+    cmd++;
+    fclose(fp);
+    return true;
+}
+
+void toFile(char* command, char** filename, int i, int* saved){
+    int size= (int)strlen(command)-i;
+
+    strncpy(*filename, command+i+3, size);
+
+    (*saved)= redirectToFile(*filename);
+
+    char * ptr= strchr(command, '(');
+    if(ptr !=NULL)
+        command[i]='\0';
+}
+
+int redirectToFile(char* filename) {
+    int saved = dup(STDERR_FILENO);
+    if (saved < 0) {
+        perror("dup");
+        exit(1);
+    }
+
+    int dp = open(filename, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+    if (dp < 0) {
+        perror("open");
+        close(saved);
+        exit(1);
+    }
+    if (dup2(dp, STDERR_FILENO) < 0) {
+        perror("dup2");
+        close(saved);
+        exit(1);
+    }
+    close(dp);
+    return saved;
+}
+
+void restoreDirection(int saved){
+    if(dup2(saved, STDERR_FILENO)<0){
+        perror("dup2");
+        exit(1);
+    }
+    close(saved);
+}
+
+bool jobs(char** command){
+    char spaces[16]="               ";
+    if( command[1]!=NULL)
+        return false;
+    Job* cur=head;
+    while (cur != NULL) {
+        printf("[%d]%s%s&\n",cur->index, spaces, cur->command);
+        cur= cur->next;
+    }
+    cmd++;
+    return true;
+}
+
+bool analyse2nd(char** args, int* jobIndex){
+    bool success= false;
+    int i=0;
+    if(strcmp(args[0],"jobs")==0){
+        success= jobs(args);
+    }
+    else if(strcmp(args[0],"cat")==0){
+        success= readFile(args[1]);
+        return success;
     }
     else {
-        strcpy(key, str);
-        command = NULL;
+        while (args[i] != NULL) {
+            i++;
+        }
+        success = execute(args, i, jobIndex);
     }
+    return success;
 }
 
-void deleteAliasByKey(char* key) {
-    bool found = false;
-    for (int i = 0; i < alias_count; ++i) {
-        if (strcmp(aliases[i].key, key) == 0) {
-            free(aliases[i].key);
-            free(aliases[i].command);
-            found = true;
-            for (int j = i; j < alias_count - 1; ++j) {
-                aliases[j] = aliases[j + 1];
-            }
-            alias_count--;
-            if (alias_count > 0) {
-                Alias* temp = (Alias*)realloc(aliases, alias_count * sizeof(Alias));
-                if (temp == NULL) {
-                    perror("realloc");
-                    exitShell();
-                }
-                aliases = temp;
-            }
-            else {
-                free(aliases);
-                aliases = NULL;
-            }
-            break;
+void analyse(char** args, bool* success, int* jobIndex){
+    int i=0;
+    while (args[i] != NULL) {
+        if (strcmp(args[i], "&&") == 0 || strcmp(args[i], "||") == 0) {
+            (*success) = and_or(args, jobIndex);
+            return;
+        }
+        i++;
+    }
+
+    (*success) = analyse2nd(args, jobIndex);
+}
+
+bool numOfArgs(char** check, int len){
+    int num=len;
+    int argsInQuotes[MAX], k = 0, limit=5;
+    for (int i = 0; i < len; ++i) {
+        char* q1, * q2;
+        q1 = strchr(check[i], '\'');
+        q2 = strchr(check[i], '\"');
+        if (q1 != NULL || q2 != NULL) {
+            argsInQuotes[k++] = i;
         }
     }
-    if (!found) {
-        printf("ERR\n");
-        cmd_count--;
-        if(quotes)
-            quotes_count--;
+    for (int i = 0; i < k - 1; i += 2) {
+        num -= (argsInQuotes[i + 1] - argsInQuotes[i]);
     }
+
+    if (num > limit) {
+        return false;
+    }
+    return true;
 }
 
-void execute(char input[MAX], int n) {
+void process(char input[MAX], char** args, bool* quotes){
+    int n= (int)strlen(input);
     if(strcmp(input, "\0")==0)
         return;
 
-    quotes = false;
+    (*quotes) = false;
     for (int i = 0; i < n; ++i) {
         if (input[i] == '\'' || input[i] == '\"') {
-            quotes = true;
+            (*quotes) = true;
             break;
         }
     }
 
     //check size of command line
     if (n > MAX) {
-        printf("ERR\n");
+        fprintf(stderr,"ERR\n");
+        input[0]='\0';
         return;
     }
 
@@ -153,7 +298,11 @@ void execute(char input[MAX], int n) {
 
     int num = 0, len = 0;
     char** check;
-    check = malloc(10 * sizeof(char*));
+    check = malloc(30 * sizeof(char*));
+    if(check==NULL){
+        perror("malloc");
+        exit(1);
+    }
 
     while (t != NULL) {
         num++;
@@ -167,34 +316,39 @@ void execute(char input[MAX], int n) {
     }
 
     //recount arguments according to quotes
-    for (int i = 0; i < MAX; ++i) {
-    }    if (quotes) {
-        int argsInQuotes[MAX], k = 0;
-        for (int i = 0; i < len; ++i) {
-            char* q1, * q2;
-            q1 = strchr(check[i], '\'');
-            q2 = strchr(check[i], '\"');
-            if (q1 != NULL || q2 != NULL) {
-                argsInQuotes[k++] = i;
-            }
+    bool andor= false;
+    for (int i = 0; i < len; ++i) {
+        if(strcmp(check[i],"&&")==0 || strcmp(check[i],"||")==0){
+            andor=true;
+            break;
         }
-        for (int i = 0; i < k - 1; i += 2) {
-            num -= (argsInQuotes[i + 1] - argsInQuotes[i]);
+    }
+    bool argNum;
+    if(!andor)
+        argNum= numOfArgs(check, len);
+    else{
+        int a=0, b=0;
+        for (int i = 0; check[i]!=NULL ; ++i) {
+            if(strcmp(check[i],"&&")==0 || strcmp(check[i],"||")==0){
+                argNum= numOfArgs(check+a, i-b);
+                if(!argNum)
+                    break;
+                a=i+1;
+                b=i+2;
+            }
         }
     }
     free(check);
-    if (num > 5) {
-        printf("ERR\n");
+
+    if(!argNum){
+        fprintf(stderr,"ERR: too many arguments\n");
+        input[0]='\0';
         return;
     }
 
-    //replace alias in command
-    char temp[MAX]="";
-    for (int i = 0; i < alias_count; ++i) {
-        if(strncmp(newInput, aliases[i].key, strlen(aliases[i].key))==0 && (newInput[strlen(aliases[i].key)]==' ')){
-            sprintf(temp, "%s %s", aliases[i].command, newInput + strlen(aliases[i].key) + 1);
-            strcpy(newInput, temp);
-            break;
+    for (int i = 0; i < strlen(newInput); ++i) {
+        if(newInput[i]=='2' && newInput[i+1]=='>'){
+            newInput[i]= '\0';
         }
     }
 
@@ -207,133 +361,119 @@ void execute(char input[MAX], int n) {
         tokenQ = strtok(NULL, c);
     }
 
+    //remove brackets
+    char input2[MAX]="";
+    char* tokenB;
+    c = "(";
+    tokenB = strtok(input1, c);
+    while (tokenB != NULL) {
+        strcat(input2, tokenB);
+        tokenB = strtok(NULL, c);
+    }
+
+    char input3[MAX]="";
+    char* tokenB2;
+    c = ")";
+    tokenB2 = strtok(input2, c);
+    while (tokenB2 != NULL) {
+        strcat(input3, tokenB2);
+        tokenB2 = strtok(NULL, c);
+    }
+
     //remove whitespace
-    char* tokenS;
-    tokenS = strtok(input1, " ");
     int argc = 0;
-    char** args;
-    args = malloc(10 * sizeof(char*));
+
+    char* tokenS;
+    tokenS = strtok(input3, " ");
     while (tokenS != NULL) {
         args[argc++] = tokenS;
         tokenS = strtok(NULL, " ");
     }
-
-    // **Alias command**
-    if (strcmp(args[0], "alias") == 0) {
-        char key[MAX] = "", command[MAX] = "";
-        char arg1[MAX] = "";
-        if(args[1]==NULL){
-            for (int i = 0; i < alias_count; ++i) {
-                fprintf(stdout, "%s = '%s'\n", aliases[i].key, aliases[i].command);
-                cmd_count++;
-            }
-            return;
-        }
-        for (int i = 1; i<argc; ++i) {
-            strcat(arg1, args[i]);
-            strcat(arg1, " ");
-        }
-        splitKeyCmd(arg1, key, command, '=');
-        addAlias(key, command);
-        return;
-    }
-
-    // **Unalias command**
-    if (strcmp(args[0], "unalias") == 0) {
-        deleteAliasByKey(args[1]);
-        cmd_count++;
-        if (quotes)
-            quotes_count++;
-        return;
-    }
-
-    // **Source command**
-    if (strcmp(args[0], "source") == 0) {
-        FILE* fp;
-
-        fp = fopen(args[1], "r");
-        if (fp == NULL) {
-            printf("ERR\n");
-            return;
-        }
-        char bash[15] = "";
-
-        fgets(bash, 15, fp);
-        if (strcmp(bash, "#!/bin/bash")==0) {
-            printf("ERR");
-            return;
-        }
-
-        char command[MAX] = "";
-        while(fgets(command, MAX, fp)!=NULL){
-            int l=(int)strlen(command);
-            if(command[0]!='#' && strcmp(command,"")!=0){
-                if (l > 0 && command[l - 1] == '\n')
-                    command[l - 1] = '\0';
-                if(command[0]!='#')
-                    execute(command, l);
-            }
-            script_count++;
-        }
-        fclose(fp);
-        cmd_count++;
-        return;
-    }
-
-    else {
-        char s[MAX]="";
-
-        for (int i = 1; args[i+1]!=NULL ; ++i) {
-            strcat(s,args[i]);
-            strcat(s," ");
-        }
-        memcpy(args[1],s, strlen(s));
-        args[2]=NULL;
-
-        pid_t pid;
-        int status;
-        pid = fork();
-        if (pid < 0) {
-            perror("fork");
-            exitShell();
-        }
-        if (pid == 0) {
-            if (execvp(args[0], args) == -1) {
-                perror("exec");
-                exitShell();
-            }
-            exit(1);
-        }
-        else {
-            wait(&status);
-            if (WEXITSTATUS(status) == 0) {
-                cmd_count++;
-                if(quotes)
-                    quotes_count++;
-            }
-        }
-    }
-    free(args);
+    args[argc] = NULL;
 
 }
 
-void exitShell() {
-    printf("%d\n", quotes_count);
-    if (aliases != NULL) {
-        for (int i = 0; i < alias_count; ++i) {
-            free(aliases[i].key);
-            free(aliases[i].command);
+void sig_handler(int signum) {
+    pid_t pid;
+    int status;
+    while ((pid= waitpid(-1, &status, WNOHANG))> 0) {
+        deleteJob(pid);
+        cmd++;
+    }
+}
+
+bool execute(char** args, int argc, int* jobIndex) {
+    bool success=false, background=false;
+    if(strcmp(args[argc-1], "&")==0) {
+        background = true;
+        argc--;
+        args[argc]=NULL;
+    }
+    if(strcmp(args[0],"echo")==0) {
+        char s[MAX];
+        for (int i = 1; i<argc ; ++i) {
+            strcat(s,args[i]);
+            strcat(s," ");
         }
-        free(aliases);
+        int y = (int)strlen(s)-1;
+        memcpy(args[1], s, y);
+        args[2] = NULL;
+        strcpy(s, "");
+    }
+
+    pid_t pid;
+    int status;
+    pid = fork();
+    if (pid < 0) {
+        perror("fork");
+        exit(1);
+    }
+
+    if (pid == 0) {
+        if (execvp(args[0], args) == -1) {
+            fprintf(stderr, "%s: Command not found.\n", args[0]);
+            exit(1);
+        }
+    }
+    else {
+        if(!background) {
+            wait(&status);
+            if (WEXITSTATUS(status) == 0) {
+                cmd++;
+                success = true;
+            }
+        }
+        else{
+            int t=cmd;
+            addJob(args, argc, pid, (*jobIndex));
+            printf("[%d] %d\n", (*jobIndex), pid);
+            (*jobIndex)++;
+            signal(SIGCHLD, sig_handler);
+            if(t!=cmd)
+                success=true;
+        }
+    }
+    return success;
+}
+
+void exitShell(int quotes_count) {
+    printf("commands with quotes: %d", quotes_count);
+    if(head != NULL) {
+        Job* temp=head;
+        head=head->next;
+        free(temp->command);
+        free(temp);
     }
     exit(0);
 }
 
 int main() {
+    int jobIndex=1;
+    int quotes_count = 0;
     while (1) {
+        bool quotes, success;
         int len;
         prompt();
-        printf("%s", pr);
         char input[MAX];
         if (fgets(input, MAX, stdin) == NULL) {
             perror("Failed to read input\n");
@@ -346,8 +486,43 @@ int main() {
         }
 
         if (strcmp(input, "exit_shell") == 0) {
-            exitShell();
+            cmd=0;
+            break;
         }
-        execute(input, len);
+
+        if(strcmp(input, "")==0)
+            continue;
+
+        char* filename=(char*) malloc(MAX*sizeof(char));
+        int saved;
+        if(filename==NULL){
+            perror("malloc");
+            exit(1);
+        }
+        strcpy(filename, "");
+        for (int i = 0; i < strlen(input); ++i) {
+            if(input[i]=='2' && input[i+1]=='>'){
+                toFile(input, &filename, i, &saved);
+            }
+        }
+
+        char** args = (char**) malloc(30 * sizeof(char*));
+        if (args == NULL) {
+            perror("malloc");
+            exit(1);
+        }
+
+        process(input, args, &quotes);
+        if(strcmp(input, "")==0)
+            continue;
+        analyse(args, &success, &jobIndex);
+        if(quotes && success)
+            quotes_count++;
+        if(filename!=NULL && strlen(filename)!=0)
+            restoreDirection(saved);
+        free(args);
+        free(filename);
     }
+    exitShell(quotes_count);
+    exit(0);
 }
