@@ -1,6 +1,6 @@
 simple C shell by Hala Abu Tair
 
-This program is a custom shell that allows users to execute various commands, manage background jobs, and handle input/output redirections. 
+Branch with simplified shell functionality, featuring background jobs, and input/output redirections. 
 Users are presented with a command prompt where they can enter commands, which are then parsed and executed. 
 It supports features like handling "and" and "or" operations, redirecting error output to files, and managing jobs with process IDs. 
 The shell runs continuously, prompting for input until the "exit_shell" command is entered, after which it performs cleanup and exits.
