@@ -1,3 +1,3 @@
 #!/bin/bash
-gcc -Wall main.c -o run
+gcc -Wall C_shell.c -o run
 ./run
